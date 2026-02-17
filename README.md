@@ -11,6 +11,7 @@
 
 ## 📸 Aperçu
 <img width="450" height="455" alt="Capture d&#39;écran 2026-02-17 211724" src="https://github.com/user-attachments/assets/fa23e143-9367-46bc-91df-27b166dfb5a5" />
+
 *L'interface sombre et intuitive permet une lecture rapide des données critiques.*
 
 ## 🚀 Installation et Utilisation
