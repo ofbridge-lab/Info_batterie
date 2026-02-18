@@ -20,13 +20,13 @@ Aucune installation n'est requise. Suivez simplement ces étapes :
 
 L'outil est prêt à l'emploi et ne nécessite aucune installation complexe :
 
-    Téléchargez la dernière version depuis l'onglet Releases (ou récupérez le fichier .exe dans le dépôt).
+Téléchargez la dernière version depuis l'onglet Releases (ou récupérez le fichier .exe dans le dépôt).
 
-    Placez le fichier info_batterie.exe dans le dossier de votre choix.
+ Placez le fichier info_batterie.exe dans le dossier de votre choix.
 
-    Lancez simplement info_batterie.exe par un double-clic.
+Lancez simplement info_batterie.exe par un double-clic.
 
-    [!TIP]
+> [!NOTE]
     Si vous utilisez la version exécutable, l'icône et les dépendances sont déjà incluses. Vous n'avez plus besoin de manipuler les politiques d'exécution PowerShell !
 
 > [!NOTE]
