@@ -1,7 +1,11 @@
 # ============================================================
 # Info Batterie — ofbridge_lab
-# Style : dark instrument / sci-fi HUD
+# Style : Cyber-HUD Tech-Noir (réf. Palette.cs — TechFixerHub.NET)
 # ============================================================
+# Source de vérité de version : fichier VERSION à la racine du projet.
+# Garder $ScriptVersion synchronisé avec VERSION à chaque bump (convention §1).
+$ScriptVersion = "2.1.001"
+
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -14,54 +18,118 @@ powercfg /batteryreport /output $reportPath | Out-Null
 $content = Get-Content $reportPath -Raw -Encoding UTF8
 
 # ============================================================
-# EXTRACTION
+# EXTRACTION  (support mono ET multi-batterie)
 # ============================================================
 function Get-SystemModel {
     if ($content -match "SYSTEM PRODUCT NAME\s*</td><td>(.*?)</td>") { return $Matches[1].Trim() }
     return "Unknown Device"
 }
-function Get-BattText($key) {
-    if ($content -match "label"">$key</span></td><td>(.*?)</td>") { return $Matches[1].Trim() }
-    return "—"
-}
-function Get-BattValue($key) {
-    if ($content -match "label"">$key</span></td><td>([\d\s\P{IsBasicLatin}, ]+) mWh") {
-        $val = $Matches[1] -replace "[^\d]", ""
-        if ($val -ne "") { return [int64]$val }
+
+# Récupère TOUTES les valeurs d'un label (une par batterie installée), dans l'ordre du rapport.
+function Get-BattTextAll($key) {
+    $opt = [System.Text.RegularExpressions.RegexOptions]::Singleline
+    $ms  = [regex]::Matches($content, "label"">$key</span></td><td>(.*?)</td>", $opt)
+    $out = [System.Collections.Generic.List[string]]::new()
+    foreach ($m in $ms) {
+        $v = ($m.Groups[1].Value -replace '<[^>]+>', '').Trim()
+        $out.Add($(if ($v -eq "" -or $v -eq "-") { "—" } else { $v }))
     }
-    return 0
+    return $out
+}
+function Get-BattValueAll($key) {
+    $opt = [System.Text.RegularExpressions.RegexOptions]::Singleline
+    $ms  = [regex]::Matches($content, "label"">$key</span></td><td>([\d\s\P{IsBasicLatin}, ]+?) mWh", $opt)
+    $out = [System.Collections.Generic.List[int64]]::new()
+    foreach ($m in $ms) {
+        $val = $m.Groups[1].Value -replace "[^\d]", ""
+        $out.Add($(if ($val -ne "") { [int64]$val } else { [int64]0 }))
+    }
+    return $out
 }
 
-$sysModel  = Get-SystemModel
-$battName  = Get-BattText "NAME"
-$mfg       = Get-BattText "MANUFACTURER"
-$chemistry = Get-BattText "CHEMISTRY"
-$designCap = Get-BattValue "DESIGN CAPACITY"
-$fullCap   = Get-BattValue "FULL CHARGE CAPACITY"
-$battWMI   = Get-CimInstance -ClassName Win32_Battery
-$voltageV  = if ($battWMI.DesignVoltage) { [math]::Round($battWMI.DesignVoltage / 1000, 2) } else { "—" }
-$cycles    = if ($content -match "CYCLE COUNT</span></td><td>\s*(\d+)") { $Matches[1] } else { "N/A" }
+$sysModel = Get-SystemModel
+
+# Assemble la liste des batteries en zippant les colonnes par index.
+$namesL   = Get-BattTextAll  "NAME"
+$mfgL     = Get-BattTextAll  "MANUFACTURER"
+$chemL    = Get-BattTextAll  "CHEMISTRY"
+$designL  = Get-BattValueAll "DESIGN CAPACITY"
+$fullL    = Get-BattValueAll "FULL CHARGE CAPACITY"
+$cycOpt   = [System.Text.RegularExpressions.RegexOptions]::Singleline
+$cycMs    = [regex]::Matches($content, "CYCLE COUNT</span></td><td>\s*(\d+)", $cycOpt)
+
+$nbBatt = [Math]::Max($namesL.Count, $designL.Count)
+if ($nbBatt -lt 1) { $nbBatt = 1 }
+
+$batteries = [System.Collections.Generic.List[PSObject]]::new()
+for ([int]$i = 0; $i -lt $nbBatt; $i++) {
+    $batteries.Add([PSCustomObject]@{
+        Name      = if ($i -lt $namesL.Count)  { $namesL[$i] }  else { "Batterie $($i+1)" }
+        Mfg       = if ($i -lt $mfgL.Count)    { $mfgL[$i] }    else { "—" }
+        Chemistry = if ($i -lt $chemL.Count)   { $chemL[$i] }   else { "—" }
+        DesignCap = if ($i -lt $designL.Count) { $designL[$i] } else { [int64]0 }
+        FullCap   = if ($i -lt $fullL.Count)   { $fullL[$i] }   else { [int64]0 }
+        Cycles    = if ($i -lt $cycMs.Count)   { $cycMs[$i].Groups[1].Value } else { "N/A" }
+        Health    = 0.0
+    })
+}
+foreach ($b in $batteries) {
+    $b.Health = if ($b.DesignCap -gt 0) { [math]::Round(($b.FullCap / $b.DesignCap) * 100, 1) } else { 0 }
+}
+
+# Agrégats pack (santé globale calculée sur les totaux — correct pour 1 ou N batteries)
+$battName  = $batteries[0].Name
+$mfg       = $batteries[0].Mfg
+$chemistry = $batteries[0].Chemistry
+$designCap = ($batteries | Measure-Object -Property DesignCap -Sum).Sum
+$fullCap   = ($batteries | Measure-Object -Property FullCap   -Sum).Sum
+$cyclesList = ($batteries | ForEach-Object { $_.Cycles })
+$cycles    = ($cyclesList -join " / ")
 $health    = if ($designCap -gt 0) { [math]::Round(($fullCap / $designCap) * 100, 1) } else { 0 }
 
+$battWMI   = @(Get-CimInstance -ClassName Win32_Battery)
+$dv0       = if ($battWMI.Count -gt 0) { @($battWMI[0].DesignVoltage)[0] } else { $null }
+$voltageV  = if ($dv0) { [math]::Round($dv0 / 1000, 2) } else { "—" }
+
+# ── Contenu des cartes (adapté au nombre de batteries) ──────
+if ($nbBatt -le 1) {
+    $ficheText = "• Fabricant : $mfg`n• Modèle : $battName`n• Chimie : $chemistry`n• Voltage : $voltageV V"
+    $capText   = "• Usine : {0:N0} mWh`n• Actuelle : {1:N0} mWh`n• Cycles : {2}" -f $designCap, $fullCap, $cycles
+} else {
+    $sbF = "• Batteries : $nbBatt   ·   $voltageV V`n"
+    [int]$k = 1
+    foreach ($b in $batteries) {
+        $sbF += "• B$k : $($b.Mfg) · $($b.Chemistry)`n"; $k++
+    }
+    $ficheText = $sbF.TrimEnd("`n")
+
+    $detD = ($batteries | ForEach-Object { '{0:N0}' -f $_.DesignCap }) -join " / "
+    $detF = ($batteries | ForEach-Object { '{0:N0}' -f $_.FullCap })   -join " / "
+    $capText = "• Usine (tot.) : {0:N0} mWh`n• Actuelle (tot.) : {1:N0} mWh`n• Détail usine : {2}`n• Détail act. : {3}`n• Cycles : {4}" -f `
+        $designCap, $fullCap, $detD, $detF, $cycles
+}
+
 # ============================================================
-# PALETTE — deep space + cyan/violet neon
+# PALETTE — Cyber-HUD Tech-Noir (réf. Palette.cs — TechFixerHub.NET)
 # ============================================================
-$cBG        = [System.Drawing.ColorTranslator]::FromHtml("#0B0C14")
-$cPanel     = [System.Drawing.ColorTranslator]::FromHtml("#10111E")
-$cPanelB    = [System.Drawing.ColorTranslator]::FromHtml("#14152A")
-$cBorder    = [System.Drawing.ColorTranslator]::FromHtml("#1E2040")
-$cAccent    = [System.Drawing.ColorTranslator]::FromHtml("#00D4FF")
-$cAccent2   = [System.Drawing.ColorTranslator]::FromHtml("#7B4FFF")
-$cAccent3   = [System.Drawing.ColorTranslator]::FromHtml("#FF6B35")
-$cText      = [System.Drawing.ColorTranslator]::FromHtml("#D0D8F0")
-$cTextDim   = [System.Drawing.ColorTranslator]::FromHtml("#555A80")
-$cTextMid   = [System.Drawing.ColorTranslator]::FromHtml("#8890B5")
+$cBG        = [System.Drawing.ColorTranslator]::FromHtml("#0B0C14")   # Bg     Deep Space Black
+$cPanel     = [System.Drawing.ColorTranslator]::FromHtml("#0F1020")   # Panel
+$cPanelB    = [System.Drawing.ColorTranslator]::FromHtml("#0D0E1C")   # Panel2
+$cBorder    = [System.Drawing.ColorTranslator]::FromHtml("#1F2A33")   # Border
+$cAccent    = [System.Drawing.ColorTranslator]::FromHtml("#00D4FF")   # Cyan
+$cAccent2   = [System.Drawing.ColorTranslator]::FromHtml("#7B4FFF")   # Violet
+$cGreen     = [System.Drawing.ColorTranslator]::FromHtml("#41B375")   # Green  OK / sain
+$cAmber     = [System.Drawing.ColorTranslator]::FromHtml("#FF8C00")   # Amber  Avertissement
+$cRed       = [System.Drawing.ColorTranslator]::FromHtml("#FF3B3B")   # Red    Danger
+$cText      = [System.Drawing.ColorTranslator]::FromHtml("#C8E4FF")   # corps
+$cTextMid   = [System.Drawing.ColorTranslator]::FromHtml("#4A7A8C")   # Muted
+$cTextDim   = [System.Drawing.ColorTranslator]::FromHtml("#2A4A55")   # Dim
 $cWhite     = [System.Drawing.Color]::White
 
-$clrAC      = [System.Drawing.ColorTranslator]::FromHtml("#00BFFF")
-$clrBatt    = [System.Drawing.ColorTranslator]::FromHtml("#FF8C00")
-$clrSuspend = [System.Drawing.ColorTranslator]::FromHtml("#1C1D35")
-$clrInact   = [System.Drawing.Color]::FromArgb(18, 19, 35)
+$clrAC      = $cAccent                                                # AC / secteur → Cyan
+$clrBatt    = $cAmber                                                 # Batterie     → Amber
+$clrSuspend = [System.Drawing.ColorTranslator]::FromHtml("#14202A")  # Veille (teinte Border sombre)
+$clrInact   = [System.Drawing.ColorTranslator]::FromHtml("#0D0E1C")  # fond piste inactive (Panel2)
 
 # ============================================================
 # TIMELINE DATA
@@ -188,7 +256,7 @@ $lblDevice.Size      = New-Object System.Drawing.Size(500, 18)
 $headerPanel.Controls.Add($lblDevice)
 
 $lblSub = New-Object System.Windows.Forms.Label
-$lblSub.Text      = "BATTERY MONITOR  ·  OFBRIDGE LAB"
+$lblSub.Text      = "BATTERY MONITOR  ·  OFBRIDGE LAB  ·  v$ScriptVersion"
 $lblSub.Font      = New-Object System.Drawing.Font("Consolas", 7, [System.Drawing.FontStyle]::Regular)
 $lblSub.ForeColor = $cTextDim
 $lblSub.Location  = New-Object System.Drawing.Point(32, 30)
@@ -202,7 +270,7 @@ $cardFiche = Add-GlowPanel 10 $Y_CARDS 278 140 $cAccent2
 $form.Controls.Add($cardFiche)
 
 $lblFicheTitle = New-Object System.Windows.Forms.Label
-$lblFicheTitle.Text      = "Fiche Technique"
+$lblFicheTitle.Text      = if ($nbBatt -le 1) { "Fiche Technique" } else { "Fiche Technique · $nbBatt batt." }
 $lblFicheTitle.Font      = New-Object System.Drawing.Font("Consolas", 10, [System.Drawing.FontStyle]::Bold)
 $lblFicheTitle.ForeColor = $cAccent2
 $lblFicheTitle.Location  = New-Object System.Drawing.Point(12, 10)
@@ -210,7 +278,7 @@ $lblFicheTitle.AutoSize  = $true
 $cardFiche.Controls.Add($lblFicheTitle)
 
 $lblFicheContent = New-Object System.Windows.Forms.Label
-$lblFicheContent.Text      = "• Fabricant : $mfg`n• Modèle : $battName`n• Chimie : $chemistry`n• Voltage : $voltageV V"
+$lblFicheContent.Text      = $ficheText
 $lblFicheContent.Font      = New-Object System.Drawing.Font("Consolas", 9)
 $lblFicheContent.ForeColor = $cText
 $lblFicheContent.Location  = New-Object System.Drawing.Point(12, 34)
@@ -232,7 +300,7 @@ $lblCapTitle.AutoSize  = $true
 $cardCap.Controls.Add($lblCapTitle)
 
 $lblCapContent = New-Object System.Windows.Forms.Label
-$lblCapContent.Text      = "• Usine : $designCap mWh`n• Actuelle : $fullCap mWh`n• Cycles : $cycles"
+$lblCapContent.Text      = $capText
 $lblCapContent.Font      = New-Object System.Drawing.Font("Consolas", 9)
 $lblCapContent.ForeColor = $cText
 $lblCapContent.Location  = New-Object System.Drawing.Point(12, 34)
@@ -270,12 +338,13 @@ $healthPanel.Add_Paint({
     for ([int]$seg = 0; $seg -lt $segments; $seg++) {
         [int]$sx = $bx + $seg * ($segW + 1)
         if ($seg -lt $filled) {
+            # gradient rouge → violet sur les segments remplis
             [int]$r  = [int](255 + (100 - 255) * $seg / $segments)
             [int]$gv = [int](20  + (30  - 20)  * $seg / $segments)
             [int]$b  = [int](80  + (255 - 80)  * $seg / $segments)
             $clrSeg  = [System.Drawing.Color]::FromArgb($r, $gv, $b)
         } else {
-            $clrSeg = [System.Drawing.Color]::FromArgb(22, 24, 40)
+            $clrSeg = $clrInact
         }
         $g.FillRectangle((New-Object System.Drawing.SolidBrush($clrSeg)), $sx, $by, $segW, $bh)
     }
@@ -322,28 +391,35 @@ $hasBeeped = $false
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 5000
 $timer.Add_Tick({
-    $wmi    = Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue
-    $charge = $wmi.EstimatedChargeRemaining
-    $stCode = $wmi.BatteryStatus
+    $wmi = @(Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue)
+    if ($wmi.Count -eq 0) { return }
 
-    if ($charge -eq 100) {
-        $chargeLabel.Text      = "100 %   CHARGÉE"
-        $chargeLabel.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#00FF88")
-        $stateBar.BackColor    = [System.Drawing.ColorTranslator]::FromHtml("#00FF88")
+    # Agrégation multi-batterie : charge moyenne, statut = charge si une seule charge
+    $charges = @($wmi | ForEach-Object { [int]$_.EstimatedChargeRemaining })
+    $charge  = [int][math]::Round(($charges | Measure-Object -Average).Average)
+    $states  = @($wmi | ForEach-Object { [int]$_.BatteryStatus })
+    $isChg   = ($states | Where-Object { $_ -eq 2 -or $_ -eq 6 }).Count -gt 0
+    $isFull  = ($charge -ge 100)
+    $suffix  = if ($wmi.Count -gt 1) { "  ·  $($wmi.Count) batt." } else { "" }
+
+    if ($isFull) {
+        $chargeLabel.Text      = "100 %   CHARGÉE$suffix"
+        $chargeLabel.ForeColor = $cGreen
+        $stateBar.BackColor    = $cGreen
         $chargePanel.Invalidate()
-        if (-not $hasBeeped -and ($stCode -eq 2 -or $stCode -eq 6)) {
+        if (-not $hasBeeped -and $isChg) {
             [System.Media.SystemSounds]::Exclamation.Play(); $hasBeeped = $true
         }
-    } elseif ($stCode -eq 2 -or $stCode -eq 6) {
-        $chargeLabel.Text      = "$charge %   EN CHARGE"
+    } elseif ($isChg) {
+        $chargeLabel.Text      = "$charge %   EN CHARGE$suffix"
         $chargeLabel.ForeColor = $cAccent
         $stateBar.BackColor    = $cAccent
         $chargePanel.Invalidate()
         $hasBeeped = $false
     } else {
-        $chargeLabel.Text      = "$charge %   BATTERIE"
-        $chargeLabel.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#FF8C00")
-        $stateBar.BackColor    = [System.Drawing.ColorTranslator]::FromHtml("#FF8C00")
+        $chargeLabel.Text      = "$charge %   BATTERIE$suffix"
+        $chargeLabel.ForeColor = $cAmber
+        $stateBar.BackColor    = $cAmber
         $chargePanel.Invalidate()
         $hasBeeped = $false
     }
@@ -354,11 +430,15 @@ $timer.Start()
 # TIMELINE GDI+
 # ============================================================
 $tlTitle = New-Object System.Windows.Forms.Label
-$tlTitle.Text      = "USAGE TIMELINE  ·  3 DERNIERS JOURS"
+$tlTitle.Text      = "$([char]0x25BA) USAGE TIMELINE  ·  3 DERNIERS JOURS"
 $tlTitle.Font      = New-Object System.Drawing.Font("Consolas", 9, [System.Drawing.FontStyle]::Bold)
 $tlTitle.ForeColor = $cAccent2
 $tlTitle.Location  = New-Object System.Drawing.Point(14, $Y_TL_TITLE)
 $tlTitle.AutoSize  = $true
+$tlTitle.Cursor    = [System.Windows.Forms.Cursors]::Hand
+$tlTitle.Add_Click({ $script:tlExpanded = -not $script:tlExpanded; Update-Layout })
+$tlTitle.Add_MouseEnter({ $this.ForeColor = $cAccent })
+$tlTitle.Add_MouseLeave({ $this.ForeColor = $cAccent2 })
 $form.Controls.Add($tlTitle)
 
 $tlPanel = New-Object System.Windows.Forms.Panel
@@ -483,42 +563,77 @@ $form.Controls.Add($tlPanel)
 # SÉPARATEUR
 # ============================================================
 $sepPanel = New-Object System.Windows.Forms.Panel
-$sepPanel.Location  = New-Object System.Drawing.Point(10, ($Y_BTNS - 8))
 $sepPanel.Size      = New-Object System.Drawing.Size(580, 1)
 $sepPanel.BackColor = $cBorder
 $form.Controls.Add($sepPanel)
 
 # ============================================================
-# BOUTONS
+# BOUTONS  (btn-hud : transparent, bordure colorée, hover = inversion)
 # ============================================================
-function New-HUDButton($text, [int]$x, [int]$y) {
+function New-HUDButton {
+    param(
+        [string]$text,
+        [System.Drawing.Color]$border = $cAccent2,
+        [System.Drawing.Color]$fore   = $cAccent
+    )
     $b = New-Object System.Windows.Forms.Button
     $b.Text      = $text
-    $b.Location  = New-Object System.Drawing.Point($x, $y)
-    $b.Size      = New-Object System.Drawing.Size(176, 32)
-    $b.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#0E0F1E")
-    $b.ForeColor = $cAccent
+    $b.Size      = New-Object System.Drawing.Size(285, 32)
+    $b.BackColor = $cPanel
+    $b.ForeColor = $fore
     $b.FlatStyle = "Flat"
-    $b.FlatAppearance.BorderColor = $cAccent2
+    $b.FlatAppearance.BorderColor = $border
     $b.FlatAppearance.BorderSize  = 1
     $b.Font      = New-Object System.Drawing.Font("Consolas", 9, [System.Drawing.FontStyle]::Bold)
     $b.Cursor    = [System.Windows.Forms.Cursors]::Hand
-    $b.Add_MouseEnter({ $this.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#16173A") })
-    $b.Add_MouseLeave({ $this.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#0E0F1E") })
+    $b.Tag       = @{ Border = $border; Fore = $fore }
+    # hover = inversion (fond plein couleur bordure, texte foncé)
+    $b.Add_MouseEnter({ $this.BackColor = $this.Tag.Border; $this.ForeColor = $cBG })
+    $b.Add_MouseLeave({ $this.BackColor = $cPanel;          $this.ForeColor = $this.Tag.Fore })
     return $b
 }
 
-$btn1 = New-HUDButton "RAPPORT DÉTAILLÉ"   10  $Y_BTNS
-$btn2 = New-HUDButton "PARAM. BATTERIE"    198 $Y_BTNS
-$btn3 = New-HUDButton "OPTION ALIM."       394 $Y_BTNS
+$btn1 = New-HUDButton "RAPPORT DÉTAILLÉ"
+$btn2 = New-HUDButton "PARAM. BATTERIE"
+$btn3 = New-HUDButton "OPTION ALIM."
+$btn4 = New-HUDButton "ACTIVER PERF. ÉLEVÉE" $cAmber $cAmber
 
 $btn1.Add_Click({ Start-Process $reportPath })
 $btn2.Add_Click({ Start-Process "ms-settings:batterysaver" })
 $btn3.Add_Click({ Start-Process "powercfg.cpl" })
+$btn4.Add_Click({
+    $templGuid = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"   # modèle Windows « Performances élevées »
+    $destGuid  = "11111111-2222-3333-4444-555555555555"   # copie visible dédiée (activation idempotente)
+    $r = [System.Windows.Forms.MessageBox]::Show(
+        "Activer le mode d'alimentation « Performances élevées » ?`n`nSi le schéma est masqué sur cet appareil, il sera d'abord créé depuis le modèle Windows, puis activé.`n`nContinuer ?",
+        "Mode Performances élevées",
+        [System.Windows.Forms.MessageBoxButtons]::OKCancel,
+        [System.Windows.Forms.MessageBoxIcon]::Question)
+    if ($r -ne [System.Windows.Forms.DialogResult]::OK) { return }
+    try {
+        # 1) tenter d'activer notre copie (si déjà créée lors d'un précédent clic)
+        $e = (& powercfg -setactive $destGuid 2>&1 | Out-String).Trim()
+        if ($e) {
+            # 2) copie absente → la créer depuis le modèle « Performances élevées », puis activer
+            $dup = (& powercfg -duplicatescheme $templGuid $destGuid 2>&1 | Out-String).Trim()
+            $e2  = (& powercfg -setactive $destGuid 2>&1 | Out-String).Trim()
+            if ($e2) { throw "$dup`n$e2" }
+        }
+        $active = (& powercfg -getactivescheme 2>&1 | Out-String).Trim()
+        [System.Windows.Forms.MessageBox]::Show("Mode « Performances élevées » activé.`n`n$active", "powercfg",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information)
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show("Échec de l'activation :`n$($_)", "Erreur powercfg",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error)
+    }
+})
 
 $form.Controls.Add($btn1)
 $form.Controls.Add($btn2)
 $form.Controls.Add($btn3)
+$form.Controls.Add($btn4)
 
 # ============================================================
 # SIGNATURE
@@ -526,10 +641,34 @@ $form.Controls.Add($btn3)
 $sig = New-Object System.Windows.Forms.Label
 $sig.Text      = [char]0x00A9 + " ofbridge_lab"
 $sig.Font      = New-Object System.Drawing.Font("Consolas", 7, [System.Drawing.FontStyle]::Italic)
-$sig.ForeColor = [System.Drawing.Color]::FromArgb(50, 55, 90)
+$sig.ForeColor = $cTextMid
 $sig.AutoSize  = $true
-$sig.Location  = New-Object System.Drawing.Point(450, $Y_SIG)
 $form.Controls.Add($sig)
+
+# ============================================================
+# LAYOUT DYNAMIQUE  (timeline pliable + placement bas de fenêtre)
+# ============================================================
+$script:tlExpanded = $false   # repliée par défaut ; clic sur le titre pour déplier
+function Update-Layout {
+    $tlPanel.Visible = $script:tlExpanded
+    $chev = if ($script:tlExpanded) { [char]0x25BC } else { [char]0x25BA }
+    $tlTitle.Text = "$chev USAGE TIMELINE  ·  3 DERNIERS JOURS"
+
+    [int]$below = if ($script:tlExpanded) { $Y_TL_PANEL + $panelH } else { $Y_TL_TITLE + 22 }
+    [int]$sepY  = $below + 8
+    [int]$r1    = $sepY + 10
+    [int]$r2    = $r1 + 40
+    [int]$sigY  = $r2 + 40
+
+    $sepPanel.Location = New-Object System.Drawing.Point(10, $sepY)
+    $btn1.Location = New-Object System.Drawing.Point(10,  $r1)
+    $btn2.Location = New-Object System.Drawing.Point(305, $r1)
+    $btn3.Location = New-Object System.Drawing.Point(10,  $r2)
+    $btn4.Location = New-Object System.Drawing.Point(305, $r2)
+    $sig.Location  = New-Object System.Drawing.Point(450, $sigY)
+    $form.ClientSize = New-Object System.Drawing.Size(($W + 20), ($sigY + 22))
+}
+Update-Layout
 
 # ============================================================
 # CLOSE
