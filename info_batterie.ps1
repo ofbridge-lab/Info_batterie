@@ -4,7 +4,7 @@
 # ============================================================
 # Source de vérité de version : fichier VERSION à la racine du projet.
 # Garder $ScriptVersion synchronisé avec VERSION à chaque bump (convention §1).
-$ScriptVersion = "2.1.001"
+$ScriptVersion = "2.1.003"
 
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 Add-Type -AssemblyName System.Windows.Forms
@@ -14,8 +14,19 @@ Add-Type -AssemblyName System.Drawing
 # RAPPORT
 # ============================================================
 $reportPath = "$env:TEMP\battery-report.html"
+# Version XML du même rapport : un nœud <Battery> par batterie, valeurs brutes (pas de séparateurs de milliers)
+$xmlPath = "$env:TEMP\battery-report.xml"
+# Suppression préalable : si powercfg échoue, on ne relit JAMAIS le rapport d'un lancement précédent
+Remove-Item $reportPath, $xmlPath -Force -ErrorAction SilentlyContinue
+
+$content = ""
 powercfg /batteryreport /output $reportPath | Out-Null
-$content = Get-Content $reportPath -Raw -Encoding UTF8
+if (Test-Path $reportPath) { $content = Get-Content $reportPath -Raw -Encoding UTF8 }
+$reportXml = $null
+try {
+    powercfg /batteryreport /xml /output $xmlPath | Out-Null
+    if (Test-Path $xmlPath) { [xml]$reportXml = Get-Content $xmlPath -Raw -Encoding UTF8 }
+} catch { }
 
 # ============================================================
 # EXTRACTION  (support mono ET multi-batterie)
@@ -25,56 +36,68 @@ function Get-SystemModel {
     return "Unknown Device"
 }
 
-# Récupère TOUTES les valeurs d'un label (une par batterie installée), dans l'ordre du rapport.
-function Get-BattTextAll($key) {
-    $opt = [System.Text.RegularExpressions.RegexOptions]::Singleline
-    $ms  = [regex]::Matches($content, "label"">$key</span></td><td>(.*?)</td>", $opt)
-    $out = [System.Collections.Generic.List[string]]::new()
-    foreach ($m in $ms) {
-        $v = ($m.Groups[1].Value -replace '<[^>]+>', '').Trim()
-        $out.Add($(if ($v -eq "" -or $v -eq "-") { "—" } else { $v }))
-    }
-    return $out
-}
-function Get-BattValueAll($key) {
-    $opt = [System.Text.RegularExpressions.RegexOptions]::Singleline
-    $ms  = [regex]::Matches($content, "label"">$key</span></td><td>([\d\s\P{IsBasicLatin}, ]+?) mWh", $opt)
-    $out = [System.Collections.Generic.List[int64]]::new()
-    foreach ($m in $ms) {
-        $val = $m.Groups[1].Value -replace "[^\d]", ""
-        $out.Add($(if ($val -ne "") { [int64]$val } else { [int64]0 }))
-    }
-    return $out
-}
-
 $sysModel = Get-SystemModel
 
-# Assemble la liste des batteries en zippant les colonnes par index.
-$namesL   = Get-BattTextAll  "NAME"
-$mfgL     = Get-BattTextAll  "MANUFACTURER"
-$chemL    = Get-BattTextAll  "CHEMISTRY"
-$designL  = Get-BattValueAll "DESIGN CAPACITY"
-$fullL    = Get-BattValueAll "FULL CHARGE CAPACITY"
-$cycOpt   = [System.Text.RegularExpressions.RegexOptions]::Singleline
-$cycMs    = [regex]::Matches($content, "CYCLE COUNT</span></td><td>\s*(\d+)", $cycOpt)
+function Get-XmlText($v) {
+    $t = "$v".Trim()
+    if ($t -eq "" -or $t -eq "-") { return "—" } else { return $t }
+}
+function Get-XmlInt($v) {
+    [int64]$n = 0
+    if ([int64]::TryParse("$v".Trim(), [ref]$n) -and $n -gt 0) { return $n } else { return [int64]0 }
+}
 
-$nbBatt = [Math]::Max($namesL.Count, $designL.Count)
-if ($nbBatt -lt 1) { $nbBatt = 1 }
-
+# Une entrée par nœud <Battery> : chaque champ est lu DANS son propre nœud, donc une valeur
+# absente reste vide pour cette batterie sans décaler les suivantes (≠ ancien appariement par position).
 $batteries = [System.Collections.Generic.List[PSObject]]::new()
-for ([int]$i = 0; $i -lt $nbBatt; $i++) {
+$xmlBatts  = if ($reportXml) { @($reportXml.BatteryReport.Batteries.Battery | Where-Object { $_ }) } else { @() }
+[int]$k = 1
+foreach ($xb in $xmlBatts) {
+    $cyc = Get-XmlInt $xb.CycleCount   # 0 = non communiqué (le rapport HTML affiche « - »)
     $batteries.Add([PSCustomObject]@{
-        Name      = if ($i -lt $namesL.Count)  { $namesL[$i] }  else { "Batterie $($i+1)" }
-        Mfg       = if ($i -lt $mfgL.Count)    { $mfgL[$i] }    else { "—" }
-        Chemistry = if ($i -lt $chemL.Count)   { $chemL[$i] }   else { "—" }
-        DesignCap = if ($i -lt $designL.Count) { $designL[$i] } else { [int64]0 }
-        FullCap   = if ($i -lt $fullL.Count)   { $fullL[$i] }   else { [int64]0 }
-        Cycles    = if ($i -lt $cycMs.Count)   { $cycMs[$i].Groups[1].Value } else { "N/A" }
+        Name      = $(if ("$($xb.Id)".Trim()) { "$($xb.Id)".Trim() } else { "Batterie $k" })
+        Mfg       = Get-XmlText $xb.Manufacturer
+        Chemistry = Get-XmlText $xb.Chemistry
+        DesignCap = Get-XmlInt  $xb.DesignCapacity
+        FullCap   = Get-XmlInt  $xb.FullChargeCapacity
+        Cycles    = $(if ($cyc -gt 0) { "$cyc" } else { "N/A" })
         Health    = 0.0
     })
+    $k++
 }
+# Rapport XML indisponible : une batterie générique par batterie vue par Windows (min. 1 pour l'affichage)
+if ($batteries.Count -eq 0) {
+    $nbWin = [math]::Max(1, @(Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue).Count)
+    for ([int]$i = 1; $i -le $nbWin; $i++) {
+        $batteries.Add([PSCustomObject]@{
+            Name = "Batterie $i"; Mfg = "—"; Chemistry = "—"
+            DesignCap = [int64]0; FullCap = [int64]0; Cycles = "N/A"; Health = 0.0
+        })
+    }
+}
+$nbBatt = $batteries.Count
+
+# Repli WMI si le rapport n'a pas fourni les capacités (firmware incomplet).
+# Appariement par NOM d'appareil (BatteryStaticData.DeviceName = Id du rapport) puis par InstanceName
+# entre classes WMI ; la position n'est utilisée que si les deux listes ont le même nombre de batteries.
+$wmiStatic = @(Get-CimInstance -Namespace root\wmi -ClassName BatteryStaticData          -ErrorAction SilentlyContinue)
+$wmiFull   = @(Get-CimInstance -Namespace root\wmi -ClassName BatteryFullChargedCapacity -ErrorAction SilentlyContinue)
+$sameCount = ($wmiStatic.Count -eq $batteries.Count)
+for ([int]$i = 0; $i -lt $batteries.Count; $i++) {
+    $b = $batteries[$i]
+    if ($b.DesignCap -gt 0 -and $b.FullCap -gt 0) { continue }
+    $s = @($wmiStatic | Where-Object { "$($_.DeviceName)".Trim() -eq $b.Name }) | Select-Object -First 1
+    if (-not $s -and $sameCount) { $s = $wmiStatic[$i] }
+    if ($b.DesignCap -le 0 -and $s -and $s.DesignedCapacity -gt 0) { $b.DesignCap = [int64]$s.DesignedCapacity }
+    if ($b.FullCap -le 0) {
+        $f = if ($s) { @($wmiFull | Where-Object { $_.InstanceName -eq $s.InstanceName }) | Select-Object -First 1 }
+        if (-not $f -and $wmiFull.Count -eq $batteries.Count) { $f = $wmiFull[$i] }
+        if ($f -and $f.FullChargedCapacity -gt 0) { $b.FullCap = [int64]$f.FullChargedCapacity }
+    }
+}
+# Santé = $null quand elle ne peut pas être calculée (≠ 0 %, qui signifierait une batterie morte)
 foreach ($b in $batteries) {
-    $b.Health = if ($b.DesignCap -gt 0) { [math]::Round(($b.FullCap / $b.DesignCap) * 100, 1) } else { 0 }
+    $b.Health = if ($b.DesignCap -gt 0 -and $b.FullCap -gt 0) { [math]::Round(($b.FullCap / $b.DesignCap) * 100, 1) } else { $null }
 }
 
 # Agrégats pack (santé globale calculée sur les totaux — correct pour 1 ou N batteries)
@@ -85,7 +108,10 @@ $designCap = ($batteries | Measure-Object -Property DesignCap -Sum).Sum
 $fullCap   = ($batteries | Measure-Object -Property FullCap   -Sum).Sum
 $cyclesList = ($batteries | ForEach-Object { $_.Cycles })
 $cycles    = ($cyclesList -join " / ")
-$health    = if ($designCap -gt 0) { [math]::Round(($fullCap / $designCap) * 100, 1) } else { 0 }
+# Santé pack : uniquement si TOUTES les batteries ont des capacités exploitables (sinon total faussé)
+$capsOK    = @($batteries | Where-Object { $null -eq $_.Health }).Count -eq 0
+$health    = if ($capsOK -and $designCap -gt 0) { [math]::Round(($fullCap / $designCap) * 100, 1) } else { $null }
+$noBattery = @(Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue).Count -eq 0
 
 $battWMI   = @(Get-CimInstance -ClassName Win32_Battery)
 $dv0       = if ($battWMI.Count -gt 0) { @($battWMI[0].DesignVoltage)[0] } else { $null }
@@ -94,7 +120,8 @@ $voltageV  = if ($dv0) { [math]::Round($dv0 / 1000, 2) } else { "—" }
 # ── Contenu des cartes (adapté au nombre de batteries) ──────
 if ($nbBatt -le 1) {
     $ficheText = "• Fabricant : $mfg`n• Modèle : $battName`n• Chimie : $chemistry`n• Voltage : $voltageV V"
-    $capText   = "• Usine : {0:N0} mWh`n• Actuelle : {1:N0} mWh`n• Cycles : {2}" -f $designCap, $fullCap, $cycles
+    $fmtCap    = { param($v) if ($v -gt 0) { '{0:N0} mWh' -f $v } else { 'non communiquée' } }
+    $capText   = "• Usine : {0}`n• Actuelle : {1}`n• Cycles : {2}" -f (& $fmtCap $designCap), (& $fmtCap $fullCap), $cycles
 } else {
     $sbF = "• Batteries : $nbBatt   ·   $voltageV V`n"
     [int]$k = 1
@@ -103,10 +130,14 @@ if ($nbBatt -le 1) {
     }
     $ficheText = $sbF.TrimEnd("`n")
 
-    $detD = ($batteries | ForEach-Object { '{0:N0}' -f $_.DesignCap }) -join " / "
-    $detF = ($batteries | ForEach-Object { '{0:N0}' -f $_.FullCap })   -join " / "
-    $capText = "• Usine (tot.) : {0:N0} mWh`n• Actuelle (tot.) : {1:N0} mWh`n• Détail usine : {2}`n• Détail act. : {3}`n• Cycles : {4}" -f `
-        $designCap, $fullCap, $detD, $detF, $cycles
+    # Valeur manquante → « ? » dans le détail, et total marqué incomplet (jamais une somme partielle muette)
+    $fmtDet = { param($v) if ($v -gt 0) { '{0:N0}' -f $v } else { '?' } }
+    $fmtTot = { param($sum, $prop)
+        if (@($batteries | Where-Object { $_.$prop -le 0 }).Count -gt 0) { 'incomplet' } else { '{0:N0} mWh' -f $sum } }
+    $detD = ($batteries | ForEach-Object { & $fmtDet $_.DesignCap }) -join " / "
+    $detF = ($batteries | ForEach-Object { & $fmtDet $_.FullCap })   -join " / "
+    $capText = "• Usine (tot.) : {0}`n• Actuelle (tot.) : {1}`n• Détail usine : {2}`n• Détail act. : {3}`n• Cycles : {4}" -f `
+        (& $fmtTot $designCap 'DesignCap'), (& $fmtTot $fullCap 'FullCap'), $detD, $detF, $cycles
 }
 
 # ============================================================
@@ -130,13 +161,47 @@ $clrAC      = $cAccent                                                # AC / sec
 $clrBatt    = $cAmber                                                 # Batterie     → Amber
 $clrSuspend = [System.Drawing.ColorTranslator]::FromHtml("#14202A")  # Veille (teinte Border sombre)
 $clrInact   = [System.Drawing.ColorTranslator]::FromHtml("#0D0E1C")  # fond piste inactive (Panel2)
+$clrUnknown = [System.Drawing.ColorTranslator]::FromHtml("#333355")  # source inconnue (timeline)
+
+# ============================================================
+# RESSOURCES GDI PARTAGÉES
+# ============================================================
+# Créées UNE fois et libérées à la fermeture. Les recréer dans chaque Paint (bloc charge redessiné
+# toutes les 5 s) accumulait des handles GDI non libérés sur les sessions longues.
+$gdi = @{
+    PenViolet = New-Object System.Drawing.Pen($cAccent2, 1)
+    PenCyan   = New-Object System.Drawing.Pen($cAccent, 1)
+    PenBorder = New-Object System.Drawing.Pen($cBorder, 1)
+    PenMark   = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(35, 38, 65), 1)
+    PenNoon   = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(55, 58, 95), 1)
+    BrCyan    = New-Object System.Drawing.SolidBrush($cAccent)
+    BrViolet  = New-Object System.Drawing.SolidBrush($cAccent2)
+    BrWhite   = New-Object System.Drawing.SolidBrush($cWhite)
+    BrText    = New-Object System.Drawing.SolidBrush($cText)
+    BrMuted   = New-Object System.Drawing.SolidBrush($cTextMid)
+    BrDim     = New-Object System.Drawing.SolidBrush($cTextDim)
+    BrPanelB  = New-Object System.Drawing.SolidBrush($cPanelB)
+    BrInact   = New-Object System.Drawing.SolidBrush($clrInact)
+    BrFill    = New-Object System.Drawing.SolidBrush($cWhite)   # pinceau réutilisable : on change .Color
+    F9        = New-Object System.Drawing.Font("Consolas", 9)
+    F10       = New-Object System.Drawing.Font("Consolas", 10, [System.Drawing.FontStyle]::Regular)
+    F10B      = New-Object System.Drawing.Font("Consolas", 10, [System.Drawing.FontStyle]::Bold)
+    F11B      = New-Object System.Drawing.Font("Consolas", 11, [System.Drawing.FontStyle]::Bold)
+    F12B      = New-Object System.Drawing.Font("Consolas", 12, [System.Drawing.FontStyle]::Bold)
+    F22B      = New-Object System.Drawing.Font("Consolas", 22, [System.Drawing.FontStyle]::Bold)
+    F28B      = New-Object System.Drawing.Font("Consolas", 28, [System.Drawing.FontStyle]::Bold)
+}
 
 # ============================================================
 # TIMELINE DATA
 # ============================================================
 function Get-TimelineEvents {
+    # 3e cellule class="acdc" obligatoire : seul le tableau « Recent usage » l'a. Le tableau « Battery usage »
+    # a la même structure mais une DURÉE à cette place — sans ce filtre ses lignes s'intercalaient (blocs gris).
+    # [^<]* et non (.*?) : avec Singleline, .*? déborde sur les lignes suivantes quand le filtre échoue
+    # → retour arrière catastrophique (mesuré : 62 s au lieu de 1 ms).
     $rows = [regex]::Matches($content,
-        '<tr[^>]*class="[^"]*"[^>]*>\s*<td[^>]*class="dateTime"[^>]*><span[^>]*class="date"[^>]*>(.*?)</span>\s*<span[^>]*class="time"[^>]*>(.*?)</span></td>\s*<td[^>]*class="state"[^>]*>\s*(.*?)\s*</td>\s*<td[^>]*>(.*?)</td>\s*<td[^>]*>(.*?)</td>',
+        '<tr[^>]*>\s*<td[^>]*class="dateTime"[^>]*><span[^>]*class="date"[^>]*>([^<]*)</span>\s*<span[^>]*class="time"[^>]*>([^<]*)</span></td>\s*<td[^>]*class="state"[^>]*>([^<]*)</td>\s*<td[^>]*class="acdc"[^>]*>([^<]*)</td>\s*<td[^>]*>([^<]*)</td>',
         [System.Text.RegularExpressions.RegexOptions]::Singleline)
 
     $events = [System.Collections.Generic.List[PSObject]]::new()
@@ -223,10 +288,10 @@ function Add-GlowPanel {
     $p.BackColor = $cPanelB
     $p.Add_Paint({
         param($s, $e)
-        $pen = New-Object System.Drawing.Pen($s.Tag, 1)
-        $e.Graphics.DrawRectangle($pen, 0, 0, ($s.Width - 1), ($s.Height - 1))
+        $e.Graphics.DrawRectangle($s.Tag, 0, 0, ($s.Width - 1), ($s.Height - 1))
     })
-    $p.Tag = $BorderColor
+    $p.Tag = New-Object System.Drawing.Pen($BorderColor, 1)   # stylo propre au panneau, créé une fois
+    $p.Add_Disposed({ $this.Tag.Dispose() })
     return $p
 }
 
@@ -240,10 +305,8 @@ $headerPanel.BackColor = $cPanel
 $headerPanel.Add_Paint({
     param($s, $e)
     $g = $e.Graphics
-    $pen1 = New-Object System.Drawing.Pen($cAccent2, 1)
-    $g.DrawLine($pen1, 0, 55, 600, 55)
-    $brA = New-Object System.Drawing.SolidBrush($cAccent)
-    $g.FillRectangle($brA, 20, 20, 3, 18)
+    $g.DrawLine($gdi.PenViolet, 0, 55, 600, 55)
+    $g.FillRectangle($gdi.BrCyan, 20, 20, 3, 18)
 })
 $form.Controls.Add($headerPanel)
 
@@ -319,16 +382,19 @@ $healthPanel.Add_Paint({
     $g = $e.Graphics
     $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
 
-    $pen = New-Object System.Drawing.Pen($cAccent2, 1)
-    $g.DrawRectangle($pen, 0, 0, ($s.Width-1), ($s.Height-1))
+    $g.DrawRectangle($gdi.PenViolet, 0, 0, ($s.Width-1), ($s.Height-1))
+    $g.DrawString("Santé de la batterie", $gdi.F12B, $gdi.BrViolet, [float]14, [float]10)
 
-    $fSmall = New-Object System.Drawing.Font("Consolas", 12, [System.Drawing.FontStyle]::Bold)
-    $brDim  = New-Object System.Drawing.SolidBrush($cAccent2)
-    $g.DrawString("Santé de la batterie", $fSmall, $brDim, [float]14, [float]10)
+    if ($null -eq $health) {
+        # Donnée absente : on l'affiche comme telle, jamais comme « 0 % »
+        $g.DrawString("N/D", $gdi.F22B, $gdi.BrMuted, [float]14, [float]32)
+        $msg = if ($noBattery) { "Aucune batterie détectée par Windows." }
+               else { "Capacité nominale ou actuelle non fournie par le firmware.`nSanté non calculable — voir le rapport détaillé." }
+        $g.DrawString($msg, $gdi.F9, $gdi.BrText, [float]130, [float]38)
+        return
+    }
 
-    $fBig  = New-Object System.Drawing.Font("Consolas", 28, [System.Drawing.FontStyle]::Bold)
-    $brVal = New-Object System.Drawing.SolidBrush($cWhite)
-    $g.DrawString("$health %", $fBig, $brVal, [float]14, [float]28)
+    $g.DrawString("$health %", $gdi.F28B, $gdi.BrWhite, [float]14, [float]28)
 
     [int]$bx = 175; [int]$by = 42; [int]$bw = 380; [int]$bh = 18
     [int]$segments = 20
@@ -346,7 +412,8 @@ $healthPanel.Add_Paint({
         } else {
             $clrSeg = $clrInact
         }
-        $g.FillRectangle((New-Object System.Drawing.SolidBrush($clrSeg)), $sx, $by, $segW, $bh)
+        $gdi.BrFill.Color = $clrSeg
+        $g.FillRectangle($gdi.BrFill, $sx, $by, $segW, $bh)
     }
 })
 $form.Controls.Add($healthPanel)
@@ -361,11 +428,8 @@ $chargePanel.BackColor = $cPanelB
 $chargePanel.Add_Paint({
     param($s, $e)
     $g = $e.Graphics
-    $pen = New-Object System.Drawing.Pen($cAccent, 1)
-    $g.DrawRectangle($pen, 0, 0, ($s.Width-1), ($s.Height-1))
-    $fSmall  = New-Object System.Drawing.Font("Consolas", 10, [System.Drawing.FontStyle]::Bold)
-    $brTitle = New-Object System.Drawing.SolidBrush($cAccent)
-    $g.DrawString("CHARGE LEVEL", $fSmall, $brTitle, [float]20, [float]10)
+    $g.DrawRectangle($gdi.PenCyan, 0, 0, ($s.Width-1), ($s.Height-1))
+    $g.DrawString("CHARGE LEVEL", $gdi.F10B, $gdi.BrCyan, [float]20, [float]10)
 })
 $form.Controls.Add($chargePanel)
 
@@ -373,8 +437,8 @@ $chargeLabel = New-Object System.Windows.Forms.Label
 $chargeLabel.Text      = "···"
 $chargeLabel.Font      = New-Object System.Drawing.Font("Consolas", 22, [System.Drawing.FontStyle]::Bold)
 $chargeLabel.ForeColor = $cWhite
-$chargeLabel.Location  = New-Object System.Drawing.Point(0, 30)
-$chargeLabel.Size      = New-Object System.Drawing.Size(580, 52)
+$chargeLabel.Location  = New-Object System.Drawing.Point(1, 30)    # 1 px de retrait : ne masque pas le cadre
+$chargeLabel.Size      = New-Object System.Drawing.Size(578, 52)
 $chargeLabel.TextAlign = "MiddleCenter"
 $chargePanel.Controls.Add($chargeLabel)
 
@@ -384,46 +448,123 @@ $stateBar.Size      = New-Object System.Drawing.Size(3, 52)
 $stateBar.BackColor = $cTextDim
 $chargePanel.Controls.Add($stateBar)
 
+# ── Bascule son (bip de fin de charge) ─────────────────────
+# État en mémoire uniquement : rien n'est écrit sur le PC client, retour à ACTIVÉ au prochain lancement.
+$script:soundOn = $true
+$lblSound = New-Object System.Windows.Forms.Label
+$lblSound.Font      = New-Object System.Drawing.Font("Consolas", 8, [System.Drawing.FontStyle]::Bold)
+$lblSound.Location  = New-Object System.Drawing.Point(430, 8)
+$lblSound.Size      = New-Object System.Drawing.Size(140, 16)
+$lblSound.TextAlign = "MiddleRight"
+$lblSound.Cursor    = [System.Windows.Forms.Cursors]::Hand
+function Update-SoundLabel {
+    if ($script:soundOn) { $lblSound.Text = "[ SON : ACTIVÉ ]"; $lblSound.ForeColor = $cAccent }
+    else                 { $lblSound.Text = "[ SON : COUPÉ ]";  $lblSound.ForeColor = $cTextMid }
+}
+$lblSound.Add_Click({ $script:soundOn = -not $script:soundOn; Update-SoundLabel })
+$lblSound.Add_MouseEnter({ $this.ForeColor = $cWhite })
+$lblSound.Add_MouseLeave({ Update-SoundLabel })
+Update-SoundLabel
+$chargePanel.Controls.Add($lblSound)
+(New-Object System.Windows.Forms.ToolTip).SetToolTip($lblSound, "Activer / couper le bip de fin de charge")
+
 # ============================================================
 # TIMER
 # ============================================================
-$hasBeeped = $false
+# Portée script obligatoire : une affectation simple dans le handler créerait une variable
+# locale perdue à chaque tick (le bip se rejouerait toutes les 5 s).
+$script:hasBeeped = $false
+[int]$FULL_THRESHOLD = 97   # beaucoup de firmwares plafonnent à 97-99 % en fin de charge
+
+# Tailles de police décroissantes pour que le texte d'état tienne dans le bloc (ex. « BRANCHÉ · NE CHARGE PAS
+# · 2 batt. » ≈ 700 px en 22 pt pour 580 px disponibles). Créées une fois (cf. ressources GDI partagées).
+$chargeFonts = @(22, 19, 16, 14 | ForEach-Object { New-Object System.Drawing.Font("Consolas", $_, [System.Drawing.FontStyle]::Bold) })
+[int]$CHARGE_TEXT_MAX_W = 580 - 2 * 24   # marge pour la barre d'état à gauche
+
+function Set-ChargeDisplay([string]$text, [System.Drawing.Color]$color) {
+    $font = $chargeFonts[-1]
+    foreach ($f in $chargeFonts) {
+        if ([System.Windows.Forms.TextRenderer]::MeasureText($text, $f).Width -le $CHARGE_TEXT_MAX_W) { $font = $f; break }
+    }
+    $chargeLabel.Font      = $font
+    $chargeLabel.Text      = $text
+    $chargeLabel.ForeColor = $color
+    $stateBar.BackColor    = $color
+    $chargePanel.Invalidate()
+}
+
+# Capacités à pleine charge : ne varient pas en cours de session → lues une seule fois
+# (chaque requête WMI bloque l'interface ; le rafraîchissement faisait 3 requêtes / 5 s ≈ 175 ms).
+$script:fcCache = @(Get-CimInstance -Namespace root\wmi -ClassName BatteryFullChargedCapacity -ErrorAction SilentlyContinue)
+
+function Update-Charge {
+    # Source principale : root\wmi\BatteryStatus (distingue secteur / charge réelle)
+    $st  = @(Get-CimInstance -Namespace root\wmi -ClassName BatteryStatus -ErrorAction SilentlyContinue |
+             Where-Object { $_.Active -ne $false })
+    # Win32_Battery seulement en repli (pas de BatteryStatus exploitable)
+    $wmi = if ($st.Count -eq 0 -or @($st | Where-Object { $_.RemainingCapacity -gt 0 }).Count -eq 0) {
+        @(Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue)
+    } else { @() }
+
+    if ($st.Count -eq 0 -and $wmi.Count -eq 0) {
+        Set-ChargeDisplay "AUCUNE BATTERIE DÉTECTÉE" $cTextMid
+        return
+    }
+    $nb     = [math]::Max($st.Count, $wmi.Count)
+    $suffix = if ($nb -gt 1) { "  ·  $nb batt." } else { "" }
+
+    # Charge pondérée par capacité (mWh restants / mWh pleins) sur les MÊMES batteries (appariées par
+    # InstanceName) : une batterie inactive ne doit pas gonfler le dénominateur. Repli : moyenne Win32.
+    $ids     = @($st | ForEach-Object { $_.InstanceName })
+    $remSum  = [double](($st | Measure-Object -Property RemainingCapacity -Sum).Sum)
+    $fullSum = [double]((@($script:fcCache | Where-Object { $ids -contains $_.InstanceName }) |
+                         Measure-Object -Property FullChargedCapacity -Sum).Sum)
+    if ($remSum -gt 0 -and $fullSum -gt 0) {
+        $charge = [int][math]::Min(100, [math]::Round($remSum / $fullSum * 100))
+    } elseif ($wmi.Count -gt 0) {
+        $charge = [int][math]::Round((@($wmi | ForEach-Object { [int]$_.EstimatedChargeRemaining }) |
+                                      Measure-Object -Average).Average)
+    } else {
+        Set-ChargeDisplay "NIVEAU DE CHARGE INDISPONIBLE" $cTextMid
+        return
+    }
+
+    # Secteur et charge réelle : deux informations distinctes
+    if ($st.Count -gt 0) {
+        $onAC       = @($st | Where-Object { $_.PowerOnline }).Count -gt 0
+        $isCharging = @($st | Where-Object { $_.Charging -or $_.ChargeRate -gt 0 }).Count -gt 0
+    } else {
+        # Repli Win32_Battery : 2 = secteur (charge NON garantie), 3 = pleine, 6-9 = en charge
+        $codes      = @($wmi | ForEach-Object { [int]$_.BatteryStatus })
+        $isCharging = @($codes | Where-Object { $_ -ge 6 -and $_ -le 9 }).Count -gt 0
+        $onAC       = $isCharging -or @($codes | Where-Object { $_ -eq 2 -or $_ -eq 3 }).Count -gt 0
+    }
+
+    if ($isCharging) {
+        Set-ChargeDisplay "$charge %   EN CHARGE$suffix" $cAccent
+        $script:hasBeeped = $false
+    } elseif ($onAC -and $charge -ge $FULL_THRESHOLD) {
+        Set-ChargeDisplay "$charge %   CHARGÉE · SECTEUR$suffix" $cGreen
+        if (-not $script:hasBeeped) {
+            # hasBeeped passe à vrai même en muet : réactiver le son ne déclenche pas un bip tardif
+            if ($script:soundOn) { [System.Media.SystemSounds]::Exclamation.Play() }
+            $script:hasBeeped = $true
+        }
+    } elseif ($onAC) {
+        # Branché mais ne charge pas : seuil constructeur (mode conservation 60/80 %),
+        # chargeur insuffisant, ou batterie / circuit de charge défaillant.
+        Set-ChargeDisplay "$charge %   BRANCHÉ · NE CHARGE PAS$suffix" $cRed
+        $script:hasBeeped = $false
+    } else {
+        Set-ChargeDisplay "$charge %   SUR BATTERIE$suffix" $cAmber
+        $script:hasBeeped = $false
+    }
+}
+
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 5000
-$timer.Add_Tick({
-    $wmi = @(Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue)
-    if ($wmi.Count -eq 0) { return }
-
-    # Agrégation multi-batterie : charge moyenne, statut = charge si une seule charge
-    $charges = @($wmi | ForEach-Object { [int]$_.EstimatedChargeRemaining })
-    $charge  = [int][math]::Round(($charges | Measure-Object -Average).Average)
-    $states  = @($wmi | ForEach-Object { [int]$_.BatteryStatus })
-    $isChg   = ($states | Where-Object { $_ -eq 2 -or $_ -eq 6 }).Count -gt 0
-    $isFull  = ($charge -ge 100)
-    $suffix  = if ($wmi.Count -gt 1) { "  ·  $($wmi.Count) batt." } else { "" }
-
-    if ($isFull) {
-        $chargeLabel.Text      = "100 %   CHARGÉE$suffix"
-        $chargeLabel.ForeColor = $cGreen
-        $stateBar.BackColor    = $cGreen
-        $chargePanel.Invalidate()
-        if (-not $hasBeeped -and $isChg) {
-            [System.Media.SystemSounds]::Exclamation.Play(); $hasBeeped = $true
-        }
-    } elseif ($isChg) {
-        $chargeLabel.Text      = "$charge %   EN CHARGE$suffix"
-        $chargeLabel.ForeColor = $cAccent
-        $stateBar.BackColor    = $cAccent
-        $chargePanel.Invalidate()
-        $hasBeeped = $false
-    } else {
-        $chargeLabel.Text      = "$charge %   BATTERIE$suffix"
-        $chargeLabel.ForeColor = $cAmber
-        $stateBar.BackColor    = $cAmber
-        $chargePanel.Invalidate()
-        $hasBeeped = $false
-    }
-})
+$timer.Add_Tick({ Update-Charge })
+Update-Charge   # 1er affichage immédiat (sinon « ··· » pendant les 5 s du 1er intervalle)
 $timer.Start()
 
 # ============================================================
@@ -454,18 +595,18 @@ $tlPanel.Add_Paint({
     $g.SmoothingMode     = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
     $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
 
-    $fDate   = New-Object System.Drawing.Font("Consolas", 11, [System.Drawing.FontStyle]::Bold)
-    $fSmall  = New-Object System.Drawing.Font("Consolas", 10, [System.Drawing.FontStyle]::Regular)
-    $fLegend = New-Object System.Drawing.Font("Consolas", 11, [System.Drawing.FontStyle]::Bold)
+    $fDate   = $gdi.F11B
+    $fSmall  = $gdi.F10
+    $fLegend = $gdi.F11B
 
-    $brDate  = New-Object System.Drawing.SolidBrush($cAccent2)
-    $brDim   = New-Object System.Drawing.SolidBrush($cTextDim)
-    $brPanel = New-Object System.Drawing.SolidBrush($cPanelB)
-    $brInact = New-Object System.Drawing.SolidBrush($clrInact)
+    $brDate  = $gdi.BrViolet
+    $brDim   = $gdi.BrDim
+    $brPanel = $gdi.BrPanelB
+    $brInact = $gdi.BrInact
 
-    $penBorder = New-Object System.Drawing.Pen($cBorder, 1)
-    $penMark   = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(35, 38, 65), 1)
-    $penNoon   = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(55, 58, 95), 1)
+    $penBorder = $gdi.PenBorder
+    $penMark   = $gdi.PenMark
+    $penNoon   = $gdi.PenNoon
 
     $script:tlHitZones.Clear()
 
@@ -504,12 +645,13 @@ $tlPanel.Add_Paint({
             [int]$wPx = [int]($wFrac * $BAR_W)
             if ($wPx -lt 3) { $wPx = 3 }
 
-            $clr = [System.Drawing.ColorTranslator]::FromHtml("#333355")
+            $clr = $clrUnknown
             if     ($ev.State -eq "Suspended")  { $clr = $clrSuspend }
             elseif ($ev.Source -eq "Battery")   { $clr = $clrBatt }
             elseif ($ev.Source -eq "AC")        { $clr = $clrAC }
 
-            $g.FillRectangle((New-Object System.Drawing.SolidBrush($clr)), $xPx, $y, $wPx, $BAR_H)
+            $gdi.BrFill.Color = $clr
+            $g.FillRectangle($gdi.BrFill, $xPx, $y, $wPx, $BAR_H)
 
             [int]$durMin = [math]::Max(1, [int](($tEnd - $tStart).TotalMinutes))
             $durStr = if ($durMin -ge 60) { "$([int]($durMin/60))h $($durMin % 60)min" } else { "${durMin}min" }
@@ -537,8 +679,8 @@ $tlPanel.Add_Paint({
     )
     [int]$lx = $BAR_L
     foreach ($it in $items) {
-        $brL = New-Object System.Drawing.SolidBrush($it.C)
-        $g.FillRectangle($brL, $lx, ($legY + 2), 13, 13)
+        $gdi.BrFill.Color = $it.C
+        $g.FillRectangle($gdi.BrFill, $lx, ($legY + 2), 13, 13)
         $g.DrawString($it.L, $fLegend, $brDim, [float]($lx + 18), [float]($legY - 1))
         $lx += 150
     }
@@ -598,7 +740,13 @@ $btn2 = New-HUDButton "PARAM. BATTERIE"
 $btn3 = New-HUDButton "OPTION ALIM."
 $btn4 = New-HUDButton "ACTIVER PERF. ÉLEVÉE" $cAmber $cAmber
 
-$btn1.Add_Click({ Start-Process $reportPath })
+$btn1.Add_Click({
+    if (Test-Path $reportPath) { Start-Process $reportPath }
+    else {
+        [System.Windows.Forms.MessageBox]::Show("Le rapport n'a pas pu être généré par powercfg.", "Rapport indisponible",
+            [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+    }
+})
 $btn2.Add_Click({ Start-Process "ms-settings:batterysaver" })
 $btn3.Add_Click({ Start-Process "powercfg.cpl" })
 $btn4.Add_Click({
@@ -675,3 +823,8 @@ Update-Layout
 # ============================================================
 $form.Add_FormClosing({ $timer.Stop() })
 $form.ShowDialog() | Out-Null
+
+# Libération explicite des ressources (fenêtre + objets GDI partagés)
+$timer.Dispose()
+$form.Dispose()
+foreach ($o in @($gdi.Values) + $chargeFonts) { $o.Dispose() }
