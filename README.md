@@ -1,108 +1,140 @@
-Battery Monitor v2.0 — HUD Edition
+<div align="center">
+  <img src="docs/logo.png" width="128" height="128" alt="logo">
 
-Le rapport natif de Windows est très détaillé, mais reste peu lisible. De son côté, le logiciel populaire BatteryInfoView de Nirsoft manque un peu de modernité et n'est pas toujours très intuitif au premier abord.
-Battery_Monitor propose une alternative : un outil open‑source léger développé en PowerShell, désormais doté d’une interface graphique (GUI) au style HUD / sci‑fi, permettant de surveiller simplement l’état de santé et les performances de votre batterie sous Windows.
+# BATTERY MONITOR
 
- Nouveautés de la v2.0
+**// LA VRAIE SANTÉ DE TA BATTERIE**
 
-   Nouvelle Interface "Instrument de bord" : Un design sombre (Dark Mode) avec des accents néons bleus, optimisé pour la lisibilité et l'esthétique tech.
+PowerShell + WinForms · 100 % natif Windows · interface Cyber-HUD
 
-   Historique de Charge (3 jours) : Analyse automatique des cycles de charge des dernières 72 heures pour surveiller l'évolution de votre autonomie.
+</div>
 
+<p align="center">
+  <a href="../../releases"><img src="https://img.shields.io/badge/version-v2.3.003-41B375?style=flat-square&labelColor=0B0C14" alt="Version"></a>
+  <img src="https://img.shields.io/badge/Windows-10%20%2F%2011-00D4FF?style=flat-square&labelColor=0B0C14&logo=windows&logoColor=white" alt="Windows 10 / 11">
+  <img src="https://img.shields.io/badge/PowerShell-5.1-7B4FFF?style=flat-square&labelColor=0B0C14" alt="PowerShell 5.1">
+  <a href="https://linktr.ee/ofbridgelab"><img src="https://img.shields.io/badge/Ofbridge%20Lab-blog-FF8C00?style=flat-square&labelColor=0B0C14" alt="Ofbridge Lab"></a>
+</p>
 
- Aperçu
-L'interface HUD v2.0 
+---
 
-<img width="301" height="420" alt="Capture d&#39;écran 2026-02-24 142502" src="https://github.com/user-attachments/assets/bd5aea96-c4b2-4ce6-8c5a-2b25f43ff0e8" />
+Le **rapport batterie de Windows** est très complet, mais illisible. **BatteryInfoView** de NirSoft fait le travail, mais son interface a pris de l'âge. **Battery Monitor** affiche tout ce qui compte en un écran : **fiche technique**, **capacités**, **santé**, **charge en temps réel** et **historique d'usage sur 3 jours**. C'est un exe léger, open source, sans installation et sans droits administrateur.
 
-L’interface est découpée en plusieurs sections que je vais vous détailler :
-1. Identification du matériel
+> 🎯 **Certains firmwares affichent 100 % de santé alors que la batterie a perdu plus de 13 % de sa capacité. Battery Monitor détecte ce cas et donne la vraie valeur.**
 
-Tout d'abord, le modèle de votre ordinateur. C'est une information très utile, notamment pour certains modèles Asus (gamme Zenbook), afin d'obtenir la référence exacte (la lettre manquante) nécessaire lors du remplacement de pièces.
+<div align="center">
+  <img src="docs/01-fenetre.png" width="602" alt="Battery Monitor — fenêtre principale">
+</div>
 
-<img width="750" height="100" alt="Capture d&#39;écran 2026-03-10 165244" src="https://github.com/user-attachments/assets/5d05f41f-14a7-4daa-a290-41e9f99705b8" />
+## 📑 Sommaire
 
-2. Caractéristiques et État de santé
+- ✨ [Fonctionnalités](#-fonctionnalités)
+- 🧠 [Une santé fiable, même quand le firmware se trompe](#-une-santé-fiable-même-quand-le-firmware-se-trompe)
+- 📊 [Historique d'usage sur 3 jours](#-historique-dusage-sur-3-jours)
+- ⚡ [Accès rapides](#-accès-rapides)
+- 📦 [Installation & utilisation](#-installation--utilisation)
 
-Ensuite, nous retrouvons deux tuiles principales :
+---
 
- La fiche technique : Elle regroupe les informations essentielles pour commander une nouvelle batterie sans se tromper.
- Capacité et cycles : Vous y trouverez la capacité d'origine (usine), la capacité réelle actuelle et le nombre de cycles de charge (si l'information est disponible).
- 
-<img width="748" height="190" alt="Capture d&#39;écran 2026-03-10 165303" src="https://github.com/user-attachments/assets/9dbe0aa6-61bd-45a1-8cce-3feab16b2940" />
+## ✨ Fonctionnalités
 
-Santé de la batterie : Un score en pourcentage, calculé en comparant la capacité d'usine à la capacité actuelle, pour connaître instantanément l'usure de votre matériel.
+- **Modèle exact du PC** : utile pour commander une pièce. Sur certains Asus (gamme Zenbook), il donne la lettre de référence qui manque souvent.
+- **Fiche technique** : fabricant, modèle, chimie et tension de la batterie, pour commander la bonne batterie de remplacement.
+- **Capacités** : capacité d'origine, capacité réelle actuelle et nombre de cycles (quand le firmware les communique).
+- **Santé de la batterie** : pourcentage et barre de 20 segments, avec une bulle d'info **« i »** quand la valeur est estimée.
+- **Charge en temps réel**, rafraîchie toutes les 5 s, avec 4 états distincts : **en charge**, **chargée sur secteur**, **branché mais ne charge pas** (chargeur trop faible, défaut ou limite constructeur à 60 / 80 %) et **sur batterie**.
+- **Bip de fin de charge**, désactivable d'un clic (`[ SON : ACTIVÉ ]`).
+- **Multi-batterie** : capacités et santé calculées sur l'ensemble des batteries, avec le détail par batterie.
+- **Interface Cyber-HUD** : fond sombre, accents néon, police Consolas, barre de titre noire et croix rouge de fermeture. On déplace la fenêtre en tirant la barre de titre, et **Échap** la ferme.
 
-<img width="734" height="143" alt="Capture d&#39;écran 2026-03-10 165352" src="https://github.com/user-attachments/assets/3af8a882-a7ed-4dbe-9883-6821ce8051b1" />
+---
 
-3. Statut en temps réel et Historique
+## 🧠 Une santé fiable, même quand le firmware se trompe
 
-Juste en dessous, vous pouvez consulter le niveau de charge actuel et savoir si la batterie est en cours de charge ou de décharge.
+La santé d'une batterie se calcule normalement ainsi : **capacité actuelle ÷ capacité d'origine**. Mais certains firmwares (constaté sur un HP Spectre x360) **recopient la capacité actuelle dans la capacité d'origine**. Le calcul donne alors toujours **100 %**, alors que l'historique de Windows montre une batterie passée de 58 965 à 51 374 mWh.
 
-<img width="738" height="125" alt="Capture d&#39;écran 2026-03-10 165409" src="https://github.com/user-attachments/assets/a7fbb2f3-aff1-40ab-ab54-6ea6c52cf19f" />
+Battery Monitor repère ce cas : une vraie capacité d'origine ne change jamais, alors que celle-ci varie d'un relevé à l'autre et suit la capacité actuelle. Dans ce cas :
 
-Nous avons également intégré l'usage de la batterie sur les 3 derniers jours avec un code couleur simple :
+- la référence devient la **plus haute capacité jamais relevée** ;
+- la santé s'affiche comme un **maximum** (**« ≤ 87.1 % »**), puisque la batterie neuve contenait au moins cette référence ;
+- la carte Capacités indique **« Usine : inconnue (firmware) »**, puis la référence retenue ;
+- la bulle **« i »** donne le détail au survol.
 
-    Bleu : PC sur secteur.  Orange : PC sur batterie. Gris : PC en veille.
+<div align="center">
+  <img src="docs/02-sante-bulle.png" width="592" alt="Bulle d'info de la santé estimée">
+</div>
 
-   <img width="722" height="384" alt="Capture d&#39;écran 2026-03-10 165429" src="https://github.com/user-attachments/assets/3e57f796-4eae-4d7a-9647-d5402e78deb9" />
+> 🔗 **Suite Ofbridge Lab** : la référence est aussi lue dans `batterie-historique.json`, écrit par **CyclObs** (dans `%ProgramData%\OfbridgeLab\Batterie\` ou `Historique\` à côté de l'exe). Elle est ainsi conservée même quand l'historique de Windows est effacé, par exemple après une réinstallation. Les numéros de série n'y sont jamais écrits en clair.
 
-4. Les accès rapides aux paramètres Windows
+Les **cycles de charge** à 0 sont affichés « non communiqué (firmware) » : beaucoup de firmwares ne remplissent pas cette valeur, ce qui ne veut pas dire zéro cycle.
 
-Pour vous éviter de chercher dans les menus, j'ai intégré trois boutons qui regroupent les réglages essentiels :
-<img width="734" height="57" alt="Capture d&#39;écran 2026-03-10 165452" src="https://github.com/user-attachments/assets/45e91b3b-3349-422c-a9ea-4db5b3036228" />
+---
 
-1. [ Rapport détaillé ] (PowerCfg) :
+## 📊 Historique d'usage sur 3 jours
 
-Il ouvre le rapport HTML complet généré par Windows. C'est pratique pour consulter :
-   -L’historique des capacités : L'évolution de la batterie depuis le début.
-   -Estimations de l'autonomie : Une comparaison entre l'autonomie théorique et réelle.
-   -Données constructeur : Le nom précis, le fabricant et le numéro de série de la batterie.
+Clique sur **► USAGE TIMELINE** pour déplier la frise des 3 derniers jours :
 
-2. [ Paramètres batterie ] (Interface Moderne) 
+| Couleur | Signification |
+|---|---|
+| 🟦 **Cyan** | PC sur secteur |
+| 🟧 **Orange** | PC sur batterie |
+| ⬛ **Gris** | PC en veille |
 
-Il vous envoie directement dans les réglages de Windows 10/11 pour gérer le quotidien :
-   -Économiseur de batterie : Pour régler le seuil d'activation automatique.
-   -Consommation par application : Pour voir quels logiciels utilisent le plus d'énergie.
-   -Graphique d'utilisation : Une vue simple du niveau de batterie sur les dernières 24 heures.
- 
-<img width="498" height="510" alt="Capture d&#39;écran 2026-03-10 170108" src="https://github.com/user-attachments/assets/436590da-2dbe-4bf3-9d5f-e51a533d4922" />
+Le survol d'une période affiche son détail.
 
- 3. [ Options d’alimentation ] (Panneau de configuration) : 
+<div align="center">
+  <img src="docs/03-timeline.png" width="602" alt="Historique d'usage sur 3 jours">
+</div>
 
-Il permet d'accéder aux réglages classiques du panneau de configuration :
-   -Modes de performance : Choisir entre les modes Économie ou Performances.
-   -Action à la fermeture du capot : Choisir si le PC se met en veille ou s'éteint.
-   -Mise en veille : Régler le temps avant que l'écran ou le PC ne s'éteigne tout seul.
-   
-<img width="537" height="262" alt="Capture d&#39;écran 2026-03-10 170020" src="https://github.com/user-attachments/assets/5c1c00d3-fce8-4af2-8d1b-3eb988f53d03" />
+---
 
+## ⚡ Accès rapides
 
-Installation et Utilisation
+| Bouton | Ouvre | Pour quoi faire |
+|---|---|---|
+| **RAPPORT DÉTAILLÉ** | Le rapport HTML complet de Windows (`powercfg /batteryreport`) | Historique des capacités depuis le début, estimations d'autonomie, données constructeur (nom, fabricant, numéro de série) |
+| **PARAM. BATTERIE** | Les paramètres batterie de Windows 10 / 11 | Économiseur de batterie, consommation par application, graphique des dernières 24 h |
+| **OPTION ALIM.** | Les options d'alimentation du panneau de configuration | Mode de performance, action à la fermeture du capot, délais de mise en veille |
+| **ACTIVER PERF. ÉLEVÉE** | Le mode « Performances élevées », après confirmation | Le crée depuis le modèle Windows s'il est masqué sur l'appareil, puis l'active |
 
-L'outil est prêt à l'emploi :
+---
 
-   Téléchargez la dernière version depuis l'onglet Releases.
+## 📦 Installation & utilisation
 
-   Lancez le fichier .exe (ou le script .ps1).
+1. Télécharge `Battery_Monitor.exe` depuis l'onglet [**Releases**](../../releases).
+2. Lance-le : aucune installation et aucun droit administrateur ne sont nécessaires.
+3. La fenêtre s'ouvre au premier plan après quelques secondes, le temps que Windows génère son rapport batterie.
 
-   Profitez de l'analyse automatique.
+> [!TIP]
+> Si tu utilises le script `.ps1` et qu'il est bloqué, ouvre PowerShell et lance :
+> ```powershell
+> Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+> ```
 
-    [!TIP]
-    Si vous utilisez le script .ps1 et qu'il est bloqué, ouvrez PowerShell en administrateur et lancez :
+## 🖥 Prérequis
 
-    Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+- **Windows 10 ou 11**, 64 bits.
+- **PowerShell 5.1**, inclus dans Windows.
+- Un **ordinateur portable ou une tablette** avec batterie.
 
- Configuration requise
+## 🧰 Notes techniques
 
-   Système d'exploitation : Windows 10 ou Windows 11.
+- **Sources** : `powercfg /batteryreport` (versions HTML et XML), WMI `root\wmi` (`BatteryStatus`, `BatteryFullChargedCapacity`, `BatteryStaticData`) et `Win32_Battery` en secours.
+- **Rien n'est écrit sur le PC** : le réglage du son n'est pas mémorisé, et les rapports temporaires sont régénérés à chaque lancement.
+- **Limite connue** : sans le cadre Windows, la fenêtre n'a pas de bouton de réduction.
 
-   Environnement : PowerShell 5.1 ou supérieur.
+## 📜 Historique des versions
 
-   Matériel : Ordinateur portable ou tablette Windows.
+Voir le [CHANGELOG](CHANGELOG.md) et les [Releases](../../releases).
 
-📄 Licence
+## 📄 Licence
 
-Ce projet est sous licence MIT. Consultez le fichier LICENSE pour plus de détails.
+Projet sous licence **MIT** : voir le fichier [LICENSE](LICENSE).
 
-Développé avec ⚡ par ofbridge_lab pour la communauté Windows.
+---
+
+<div align="center">
+  <sub><a href="../../releases">Téléchargements</a> · <a href="https://linktr.ee/ofbridgelab">Linktree</a></sub>
+  <br/>
+  <sub><b>BATTERY MONITOR · OFBRIDGE LAB</b> · <i>// LA VRAIE SANTÉ DE TA BATTERIE</i></sub>
+</div>
